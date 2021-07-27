@@ -312,6 +312,10 @@ enum DumpOptions {
     case some(Set<String>)
     case getAvailable((String) -> Void)
     
+    // 此处参考autoclosure章节内容
+    // https://docs.swift.org/swift-book/LanguageGuide/Closures.html
+    // 开始不理解下面定义的属性processOptions的意义，即 = {}()这种形式
+    // 后面发觉这其实就是先利用{}定义一个autoclosure，而后直接利用()调用closure
     static let processOptions: DumpOptions = {
         let parameters = CommandLine.arguments.dropFirst()
         if parameters.count == 0 {
