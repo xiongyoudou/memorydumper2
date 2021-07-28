@@ -83,7 +83,11 @@ func demangleSwift(_ string: String) -> String {
 }
 
 func demangleCpp(_ string: String) -> String {
-    return demangle(string, tool: ["c++filt", "-n"])
+//    return demangle(string, tool: ["c++filt", "-n"])
+    // 注意，此处上面注释的代码会报错：Too many levels of symbolic links
+    // 最终发现：c++filt -> llvm-cxxfilt
+    // 所以直接将命令改成源文件，则解决该问题
+    return demangle(string, tool: ["llvm-cxxfilt", "-n"])
 }
 
 func demangle(_ string: String, tool: [String]) -> String {
@@ -163,9 +167,15 @@ func objcClassName(ptr: Pointer) -> String? {
             var classCount: UInt32 = 0
             let list = objc_copyClassList(&classCount)!
             
+            // 此处加了这一句代码，否则将会在下面for循环中 newList[Int(i)]语句处崩溃
+            // 原因是因为新系统下objc_copyClassList函数的返回类型有变化
+            // 所以通过下面的语句，做一个类型转换
+            // 参考链接https://stackoverflow.com/questions/60853427/objc-copyclasslist-crash-exc-bad-instruction-after-update-to-ios-13-4-xcode-1
+            var newList = UnsafeBufferPointer(start: list, count: Int(classCount))
+            
             var map: [Pointer: AnyClass] = [:]
             for i in 0 ..< classCount {
-                let classObj: AnyClass = list[Int(i)]
+                let classObj: AnyClass = newList[Int(i)]
                 let classPtr = unsafeBitCast(classObj, to: Pointer.self)
                 map[classPtr] = classObj
             }
@@ -317,6 +327,10 @@ enum DumpOptions {
     // 开始不理解下面定义的属性processOptions的意义，即 = {}()这种形式
     // 后面发觉这其实就是先利用{}定义一个autoclosure，而后直接利用()调用closure
     static let processOptions: DumpOptions = {
+        // 先统一返回此选项，方便调试
+        return .all
+        
+        /*
         let parameters = CommandLine.arguments.dropFirst()
         if parameters.count == 0 {
             print("Available dumps are listed here. Pass the desired dumps as arguments, or pass \"all\" to dump all available:")
@@ -333,6 +347,7 @@ enum DumpOptions {
         } else {
             return .some(Set(parameters))
         }
+        */
     }()
 }
 
@@ -398,9 +413,30 @@ func dumpAndOpenGraph(dumping ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth:
     }
     line("}")
     
-    let path = "/tmp/\(filename).dot"
+    let path = "\(filename).dot"
+
     try! result.write(toFile: path, atomically: false, encoding: .utf8)
-    NSWorkspace.shared.openFile(path, withApplication: "Graphviz")
+    
+//    NSWorkspace.shared.openFile(path, withApplication: "Graphviz")
+    // 此处的改动参考链接：https://www.jianshu.com/p/c80994019053
+    runScript(fileName: filename);
+    print("执行结束：", "dot -T png \(filename).dot -o \(filename).png")
+}
+
+// 执行脚本
+func runScript(fileName: String) {
+    // 初始化并设置shell 执行命令的路径(命令解释器)
+    let task = Process()
+    task.launchPath = "/bin/sh";
+    
+    // -c 用来执行string-commands（命令字符串），
+    // 也就说不管后面的字符串里是什么都会被当做shellcode来执行
+    // dot command
+    let dotCmd = "/usr/local/bin/dot"
+    task.arguments = ["-c", "\(dotCmd) -T png \(fileName).dot -o \(fileName).png"]
+    
+    // 开始 task
+    task.launch()
 }
 
 func dumpAndOpenGraph<T>(dumping value: T, maxDepth: Int, filename: String) {
@@ -421,28 +457,38 @@ protocol P {
     func h()
 }
 
-struct EmptyStruct {}
-dumpAndOpenGraph(dumping: EmptyStruct(), maxDepth: 60, filename: "Empty struct")
+/**
+ 注意，开始下面的filename有空格（比如Simple struct），导致生成报错，故都改成无空格形式（比如SimpleStruct）
+ */
 
-class EmptyClass {}
-dumpAndOpenGraph(dumping: EmptyClass(), maxDepth: 60, filename: "Empty class")
+/**
+ 另外，注意，下面所有的class定义，必须得显式的继承自NSObject，方才能正确执行完
+ 否则会造成死循环，并最终报错：Failed to set posix_spawn_file_actions for fd 2 at index 2 with errno 9
+ 该问题参考链接https://www.jianshu.com/p/c80994019053下方的评论
+ */
+
+struct EmptyStruct {}
+dumpAndOpenGraph(dumping: EmptyStruct(), maxDepth: 60, filename: "EmptyStruct")
+
+class EmptyClass: NSObject {}
+dumpAndOpenGraph(dumping: EmptyClass(), maxDepth: 60, filename: "EmptyClass")
 
 class EmptyObjCClass: NSObject {}
-dumpAndOpenGraph(dumping: EmptyObjCClass(), maxDepth: 60, filename: "Empty ObjC Class")
+dumpAndOpenGraph(dumping: EmptyObjCClass(), maxDepth: 60, filename: "EmptyObjCClass")
 
 struct SimpleStruct {
     var x: Int = 1
     var y: Int = 2
     var z: Int = 3
 }
-dumpAndOpenGraph(dumping: SimpleStruct(), maxDepth: 60, filename: "Simple struct")
+dumpAndOpenGraph(dumping: SimpleStruct(), maxDepth: 60, filename: "SimpleStruct")
 
 class SimpleClass {
     var x: Int = 1
     var y: Int = 2
     var z: Int = 3
 }
-dumpAndOpenGraph(dumping: SimpleClass(), maxDepth: 6, filename: "Simple class")
+dumpAndOpenGraph(dumping: SimpleClass(), maxDepth: 6, filename: "SimpleClass")
 
 struct StructWithPadding {
     var a: UInt8 = 1
@@ -454,9 +500,10 @@ struct StructWithPadding {
     var g: UInt8 = 7
     var h: UInt64 = 8
 }
-dumpAndOpenGraph(dumping: StructWithPadding(), maxDepth: 60, filename: "Struct with padding")
+dumpAndOpenGraph(dumping: StructWithPadding(), maxDepth: 60, filename: "StructWithPadding")
 
-class ClassWithPadding {
+
+class ClassWithPadding: NSObject {
     var a: UInt8 = 1
     var b: UInt8 = 2
     var c: UInt8 = 3
@@ -466,9 +513,9 @@ class ClassWithPadding {
     var g: UInt8 = 7
     var h: UInt64 = 8
 }
-dumpAndOpenGraph(dumping: ClassWithPadding(), maxDepth: 60, filename: "Class with padding")
+dumpAndOpenGraph(dumping: ClassWithPadding(), maxDepth: 60, filename: "ClassWithPadding")
 
-class DeepClassSuper1 {
+class DeepClassSuper1: NSObject {
     var a = 1
 }
 class DeepClassSuper2: DeepClassSuper1 {
@@ -480,9 +527,9 @@ class DeepClassSuper3: DeepClassSuper2 {
 class DeepClass: DeepClassSuper3 {
     var d = 4
 }
-dumpAndOpenGraph(dumping: DeepClass(), maxDepth: 60, filename: "Deep class")
+dumpAndOpenGraph(dumping: DeepClass(), maxDepth: 60, filename: "DeepClass")
 
-dumpAndOpenGraph(dumping: [1, 2, 3, 4, 5], maxDepth: 4, filename: "Integer array")
+dumpAndOpenGraph(dumping: [1, 2, 3, 4, 5], maxDepth: 4, filename: "IntegerArray")
 
 struct StructSmallP: P {
     func f() {}
@@ -514,7 +561,7 @@ struct ProtocolHolder {
     var c: P
 }
 let holder = ProtocolHolder(a: StructSmallP(), b: StructBigP(), c: ClassP())
-dumpAndOpenGraph(dumping: holder, maxDepth: 4, filename: "Protocol types")
+dumpAndOpenGraph(dumping: holder, maxDepth: 4, filename: "ProtocolTypes")
 
 enum SimpleEnum {
     case A, B, C, D, E
@@ -526,7 +573,7 @@ struct SimpleEnumHolder {
     var d: SimpleEnum
     var e: SimpleEnum
 }
-dumpAndOpenGraph(dumping: SimpleEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "Simple enum")
+dumpAndOpenGraph(dumping: SimpleEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "SimpleEnum")
 
 enum IntRawValueEnum: Int {
     case A = 1, B, C, D, E
@@ -538,7 +585,7 @@ struct IntRawValueEnumHolder {
     var d: IntRawValueEnum
     var e: IntRawValueEnum
 }
-dumpAndOpenGraph(dumping: IntRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "Int raw value enum")
+dumpAndOpenGraph(dumping: IntRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "IntRawValueEnum")
 
 enum StringRawValueEnum: String {
     case A = "whatever", B, C, D, E
@@ -550,7 +597,7 @@ struct StringRawValueEnumHolder {
     var d: StringRawValueEnum
     var e: StringRawValueEnum
 }
-dumpAndOpenGraph(dumping: StringRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "String raw value enum")
+dumpAndOpenGraph(dumping: StringRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "StringRawValueEnum")
 
 enum OneAssociatedObjectEnum {
     case A(AnyObject)
@@ -563,7 +610,7 @@ struct OneAssociatedObjectEnumHolder {
     var d: OneAssociatedObjectEnum
     var e: OneAssociatedObjectEnum
 }
-dumpAndOpenGraph(dumping: OneAssociatedObjectEnumHolder(a: .A(NSObject()), b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "One associated object enum")
+dumpAndOpenGraph(dumping: OneAssociatedObjectEnumHolder(a: .A(NSObject()), b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "OneSssociatedObjectEnum")
 
 enum ManyAssociatedObjectsEnum {
     case A(AnyObject)
@@ -579,7 +626,7 @@ struct ManyAssociatedObjectsEnumHolder {
     var d: ManyAssociatedObjectsEnum
     var e: ManyAssociatedObjectsEnum
 }
-dumpAndOpenGraph(dumping: ManyAssociatedObjectsEnumHolder(a: .A(NSObject()), b: .B(NSObject()), c: .C(NSObject()), d: .D(NSObject()), e: .E(NSObject())), maxDepth: 5, filename: "Many associated objects enum")
+dumpAndOpenGraph(dumping: ManyAssociatedObjectsEnumHolder(a: .A(NSObject()), b: .B(NSObject()), c: .C(NSObject()), d: .D(NSObject()), e: .E(NSObject())), maxDepth: 5, filename: "ManySssociatedObjectsEnum")
 
 DumpCMemory({ (pointer: UnsafeRawPointer?, knownSize: Int, maxDepth: Int, name: UnsafePointer<Int8>?) in
     dumpAndOpenGraph(dumping: pointer!, knownSize: UInt(knownSize), maxDepth: maxDepth, filename: String(cString: name!))
