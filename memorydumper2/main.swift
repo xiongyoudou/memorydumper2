@@ -326,6 +326,9 @@ enum DumpOptions {
     // https://docs.swift.org/swift-book/LanguageGuide/Closures.html
     // 开始不理解下面定义的属性processOptions的意义，即 = {}()这种形式
     // 后面发觉这其实就是先利用{}定义一个autoclosure，而后直接利用()调用closure
+    
+    // 针对这种语法形式在Swift官方文档『Initializaton』这一节最后面
+    // 的内容「Setting a Default Property Value with a Closure or Function」有描述
     static let processOptions: DumpOptions = {
         // 先统一返回此选项，方便调试
         return .all
