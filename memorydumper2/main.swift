@@ -2,6 +2,7 @@
 import AppKit
 
 
+// pointer本质上是UInt，但是为了和普通的UInt区分开来，特意为指针做了一个封装
 struct Pointer {
     var address: UInt
     
@@ -14,6 +15,10 @@ struct Pointer {
     }
     
     var voidPtr: UnsafeRawPointer? {
+        // 将地址address作为初始化参数，生成一个UnsafeRawPointer结构体
+        
+        // 后面的isMalloc根据该voidPtr来判断
+        // 所以个人猜测栈上的指针通过该初始化方法生成的对象为空，只有堆上的才会生成正常对象
         return UnsafeRawPointer(bitPattern: address)
     }
 }
@@ -44,6 +49,7 @@ extension Pointer: Hashable {
 
 func symbolInfo(_ ptr: Pointer) -> Dl_info? {
     var info = Dl_info()
+    // dladdr函数获取某个地址的符号信息，如果返回非0，则获取符号信息成功
     let result = dladdr(ptr.voidPtr, &info)
     return result == 0 ? nil : info
 }
@@ -145,6 +151,8 @@ func safeRead(ptr: Pointer, limit: Int) -> [UInt8] {
     return buffer
 }
 
+// Hexadecimal is the natural language of low level computing.
+// This takes an array of bytes and dumps it out as a hexadecimal string
 func hexString<Seq: Sequence>(bytes: Seq, limit: Int? = nil, separator: String = " ") -> String where Seq.Iterator.Element == UInt8 {
     let spacesInterval = 8
     var result = ""
@@ -201,6 +209,7 @@ struct PointerAndOffset {
     var offset: Int
 }
 
+// 构造自定义Memory结构体
 struct Memory {
     var buffer: [UInt8]
     var isMalloc: Bool
@@ -210,7 +219,6 @@ struct Memory {
         self.buffer = buffer
         self.isMalloc = false
     }
-    
     init?(ptr: Pointer, knownSize: UInt? = nil) {
         let mallocLength = UInt(malloc_size(ptr.voidPtr))
         
@@ -286,6 +294,7 @@ func ==(lhs: MemoryRegion, rhs: MemoryRegion) -> Bool {
     return lhs.pointer == rhs.pointer
 }
 
+// 根据要测试的指针，以及指针指向的类型，来构造内存树
 func buildMemoryRegionTree(ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth: Int) -> [MemoryRegion] {
     let memory = Memory(ptr: Pointer(ptr), knownSize: knownSize)
     let maybeRootRegion = memory.map({ MemoryRegion(depth: 1, pointer: Pointer(ptr), memory: $0) })
@@ -316,6 +325,7 @@ func buildMemoryRegionTree(ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth: In
     
     return Array(allRegions.values)
 }
+
 
 enum DumpOptions {
     case all
@@ -355,6 +365,8 @@ enum DumpOptions {
 }
 
 func dumpAndOpenGraph(dumping ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth: Int, filename: String) {
+    
+    // 该枚举作用是来控制哪些对象需要被dump
     switch DumpOptions.processOptions {
     case .all:
         break
@@ -442,8 +454,13 @@ func runScript(fileName: String) {
     task.launch()
 }
 
+// 全局函数，非类方法
 func dumpAndOpenGraph<T>(dumping value: T, maxDepth: Int, filename: String) {
+    // 注意，下面这一句var value = value语句的作用，如果注释掉则报错如下：
+    // Cannot pass immutable value as inout argument: 'value' is a 'let' constant
     var value = value
+    
+    // 被调用函数比调用方函数多了一个knownSize参数
     dumpAndOpenGraph(dumping: &value, knownSize: UInt(MemoryLayout<T>.size), maxDepth: maxDepth, filename: filename)
 }
 
