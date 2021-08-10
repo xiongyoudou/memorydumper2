@@ -127,11 +127,21 @@ extension mach_vm_address_t {
 
 func safeRead(ptr: Pointer, into: inout [UInt8]) -> Bool {
     let result = into.withUnsafeMutableBufferPointer({ bufferPointer -> kern_return_t in
+        
+        // 注意，该closure只会进入一次
+        // withUnsafeMutableBufferPointer是Array调用的函数
+        // 可以在该closure内部直接修改数组into的元素内容，在初始调用时into数组元素全为0
+        // 经过该方法调用之后，则会赋值ptr指针开始的相应的值
+        
         var outSize: mach_vm_size_t = 0
+        // mach_vm_read_overwrite读取指定进程空间中的任意虚拟内存区域中所存储的内容
+        // 之所以选择该函数来实现在Onenote中【Exploring Swift Memory Layout】有讲
+        // 是因为该函数可以在访问错误的pointer时，不会导致程序crash，而是返回相应的错误码
         return mach_vm_read_overwrite(
             mach_task_self_,
             mach_vm_address_t(ptr),
             mach_vm_size_t(bufferPointer.count),
+            // A pointer to the first element of the buffer
             mach_vm_address_t(bufferPointer.baseAddress),
             &outSize)
     })
@@ -246,10 +256,18 @@ struct Memory {
         }
     }
     
+    // 遍历该Memory对象的buffer属性
+    // buffer属性存储的是该对象在内存中的所有内容，按字节为单位存储在数组中
     func scanPointers() -> [PointerAndOffset] {
         return buffer.withUnsafeBufferPointer({ bufferPointer in
+            /**
+               下面的withMemoryRebound将int类型的buffer数组处理成Pointer类型
+               虽然它们都是占8个字节，但是转成Pointer类型之后更容易区分int和Pointer
+             */
             return bufferPointer.baseAddress?.withMemoryRebound(to: Pointer.self, capacity: bufferPointer.count / MemoryLayout<Pointer>.size, {
                 let castBufferPointer = UnsafeBufferPointer(start: $0, count: bufferPointer.count / MemoryLayout<Pointer>.size)
+                
+                // 最终返回的数组中，数组元素是PointerAndOffset
                 return castBufferPointer.enumerated().map({ PointerAndOffset(pointer: $1, offset: $0 * MemoryLayout<Pointer>.size) })
             }) ?? []
         })
@@ -296,25 +314,43 @@ func ==(lhs: MemoryRegion, rhs: MemoryRegion) -> Bool {
 
 // 根据要测试的指针，以及指针指向的类型，来构造内存树
 func buildMemoryRegionTree(ptr: UnsafeRawPointer, knownSize: UInt?, maxDepth: Int) -> [MemoryRegion] {
+    // Memory的init方法为init?，即返回的初始化对象是一个optional
     let memory = Memory(ptr: Pointer(ptr), knownSize: knownSize)
+    // 调用optional的map方法，当memory为非nil时，执行closure，返回MemoryRegion对象
     let maybeRootRegion = memory.map({ MemoryRegion(depth: 1, pointer: Pointer(ptr), memory: $0) })
+    
+    // guard确保只有条件成功才执行guard后面的语句，否则直接else返回该函数
+    // 每一个guard必须带else
     guard let rootRegion = maybeRootRegion else { return [] }
     
+    // 定义一个Dictionary，key为pointer，value为rootRegion
+    // 初始状态该Dictionary只有root的一个key-value对
     var allRegions: [Pointer: MemoryRegion] = [rootRegion.pointer: rootRegion]
     
+    // 定义一个集合，集合开始只有root一个元素
     var toScan: Set = [rootRegion]
+    
+    // 从根部开始，遍历的分析
     while let region = toScan.popFirst() {
+        
+        // 可以设置遍历的最大深度
         if region.didScan || region.depth >= maxDepth { continue }
         
+        // childPointers是PointerAndOffset类型数组
         let childPointers = region.memory.scanPointers()
+        
+        // 二次循环，整个过程可以看做是一个深度遍历
         for pointerAndOffset in childPointers {
             let pointer = pointerAndOffset.pointer
+            
+            // 说明该指针已经访问过(可能有不同的变量都是指向同一个对象的情况)
             if let existingRegion = allRegions[pointer] {
                 existingRegion.depth = min(existingRegion.depth, region.depth + 1)
                 region.children.append(.init(offset: pointerAndOffset.offset, region: existingRegion))
                 toScan.insert(existingRegion)
             } else if let memory = Memory(ptr: pointer) {
                 let childRegion = MemoryRegion(depth: region.depth + 1, pointer: pointer, memory: memory)
+                // 加入到allRegions字典中
                 allRegions[pointer] = childRegion
                 region.children.append(.init(offset: pointerAndOffset.offset, region: childRegion))
                 toScan.insert(childRegion)
@@ -464,6 +500,8 @@ func dumpAndOpenGraph<T>(dumping value: T, maxDepth: Int, filename: String) {
     dumpAndOpenGraph(dumping: &value, knownSize: UInt(MemoryLayout<T>.size), maxDepth: maxDepth, filename: filename)
 }
 
+// 注意该函数和上面的函数，唯一的区别在于上面函数是Generic函数，dumping是一个通用参数
+// 而该函数的dumping参数是一个AnyObject参数
 func dumpAndOpenGraph(dumping object: AnyObject, maxDepth: Int, filename: String) {
     dumpAndOpenGraph(dumping: unsafeBitCast(object, to: UnsafeRawPointer.self), knownSize: nil, maxDepth: maxDepth, filename: filename)
 }
@@ -487,21 +525,21 @@ protocol P {
  该问题参考链接https://www.jianshu.com/p/c80994019053下方的评论
  */
 
-struct EmptyStruct {}
-dumpAndOpenGraph(dumping: EmptyStruct(), maxDepth: 60, filename: "EmptyStruct")
-
-class EmptyClass: NSObject {}
-dumpAndOpenGraph(dumping: EmptyClass(), maxDepth: 60, filename: "EmptyClass")
-
-class EmptyObjCClass: NSObject {}
-dumpAndOpenGraph(dumping: EmptyObjCClass(), maxDepth: 60, filename: "EmptyObjCClass")
-
-struct SimpleStruct {
-    var x: Int = 1
-    var y: Int = 2
-    var z: Int = 3
-}
-dumpAndOpenGraph(dumping: SimpleStruct(), maxDepth: 60, filename: "SimpleStruct")
+//struct EmptyStruct {}
+//dumpAndOpenGraph(dumping: EmptyStruct(), maxDepth: 60, filename: "EmptyStruct")
+//
+//class EmptyClass: NSObject {}
+//dumpAndOpenGraph(dumping: EmptyClass(), maxDepth: 60, filename: "EmptyClass")
+//
+//class EmptyObjCClass: NSObject {}
+//dumpAndOpenGraph(dumping: EmptyObjCClass(), maxDepth: 60, filename: "EmptyObjCClass")
+//
+//struct SimpleStruct {
+//    var x: Int = 1
+//    var y: Int = 2
+//    var z: Int = 3
+//}
+//dumpAndOpenGraph(dumping: SimpleStruct(), maxDepth: 60, filename: "SimpleStruct")
 
 class SimpleClass {
     var x: Int = 1
@@ -510,144 +548,144 @@ class SimpleClass {
 }
 dumpAndOpenGraph(dumping: SimpleClass(), maxDepth: 6, filename: "SimpleClass")
 
-struct StructWithPadding {
-    var a: UInt8 = 1
-    var b: UInt8 = 2
-    var c: UInt8 = 3
-    var d: UInt16 = 4
-    var e: UInt8 = 5
-    var f: UInt32 = 6
-    var g: UInt8 = 7
-    var h: UInt64 = 8
-}
-dumpAndOpenGraph(dumping: StructWithPadding(), maxDepth: 60, filename: "StructWithPadding")
-
-
-class ClassWithPadding: NSObject {
-    var a: UInt8 = 1
-    var b: UInt8 = 2
-    var c: UInt8 = 3
-    var d: UInt16 = 4
-    var e: UInt8 = 5
-    var f: UInt32 = 6
-    var g: UInt8 = 7
-    var h: UInt64 = 8
-}
-dumpAndOpenGraph(dumping: ClassWithPadding(), maxDepth: 60, filename: "ClassWithPadding")
-
-class DeepClassSuper1: NSObject {
-    var a = 1
-}
-class DeepClassSuper2: DeepClassSuper1 {
-    var b = 2
-}
-class DeepClassSuper3: DeepClassSuper2 {
-    var c = 3
-}
-class DeepClass: DeepClassSuper3 {
-    var d = 4
-}
-dumpAndOpenGraph(dumping: DeepClass(), maxDepth: 60, filename: "DeepClass")
-
-dumpAndOpenGraph(dumping: [1, 2, 3, 4, 5], maxDepth: 4, filename: "IntegerArray")
-
-struct StructSmallP: P {
-    func f() {}
-    func g() {}
-    func h() {}
-    var a = 0x6c6c616d73
-}
-struct StructBigP: P {
-    func f() {}
-    func g() {}
-    func h() {}
-    var a = 0x656772616c
-    var b = 0x1010101010101010
-    var c = 0x2020202020202020
-    var d = 0x3030303030303030
-}
-struct ClassP: P {
-    func f() {}
-    func g() {}
-    func h() {}
-    var a = 0x7373616c63
-    var b = 0x4040404040404040
-    var c = 0x5050505050505050
-    var d = 0x6060606060606060
-}
-struct ProtocolHolder {
-    var a: P
-    var b: P
-    var c: P
-}
-let holder = ProtocolHolder(a: StructSmallP(), b: StructBigP(), c: ClassP())
-dumpAndOpenGraph(dumping: holder, maxDepth: 4, filename: "ProtocolTypes")
-
-enum SimpleEnum {
-    case A, B, C, D, E
-}
-struct SimpleEnumHolder {
-    var a: SimpleEnum
-    var b: SimpleEnum
-    var c: SimpleEnum
-    var d: SimpleEnum
-    var e: SimpleEnum
-}
-dumpAndOpenGraph(dumping: SimpleEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "SimpleEnum")
-
-enum IntRawValueEnum: Int {
-    case A = 1, B, C, D, E
-}
-struct IntRawValueEnumHolder {
-    var a: IntRawValueEnum
-    var b: IntRawValueEnum
-    var c: IntRawValueEnum
-    var d: IntRawValueEnum
-    var e: IntRawValueEnum
-}
-dumpAndOpenGraph(dumping: IntRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "IntRawValueEnum")
-
-enum StringRawValueEnum: String {
-    case A = "whatever", B, C, D, E
-}
-struct StringRawValueEnumHolder {
-    var a: StringRawValueEnum
-    var b: StringRawValueEnum
-    var c: StringRawValueEnum
-    var d: StringRawValueEnum
-    var e: StringRawValueEnum
-}
-dumpAndOpenGraph(dumping: StringRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "StringRawValueEnum")
-
-enum OneAssociatedObjectEnum {
-    case A(AnyObject)
-    case B, C, D, E
-}
-struct OneAssociatedObjectEnumHolder {
-    var a: OneAssociatedObjectEnum
-    var b: OneAssociatedObjectEnum
-    var c: OneAssociatedObjectEnum
-    var d: OneAssociatedObjectEnum
-    var e: OneAssociatedObjectEnum
-}
-dumpAndOpenGraph(dumping: OneAssociatedObjectEnumHolder(a: .A(NSObject()), b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "OneSssociatedObjectEnum")
-
-enum ManyAssociatedObjectsEnum {
-    case A(AnyObject)
-    case B(AnyObject)
-    case C(AnyObject)
-    case D(AnyObject)
-    case E(AnyObject)
-}
-struct ManyAssociatedObjectsEnumHolder {
-    var a: ManyAssociatedObjectsEnum
-    var b: ManyAssociatedObjectsEnum
-    var c: ManyAssociatedObjectsEnum
-    var d: ManyAssociatedObjectsEnum
-    var e: ManyAssociatedObjectsEnum
-}
-dumpAndOpenGraph(dumping: ManyAssociatedObjectsEnumHolder(a: .A(NSObject()), b: .B(NSObject()), c: .C(NSObject()), d: .D(NSObject()), e: .E(NSObject())), maxDepth: 5, filename: "ManySssociatedObjectsEnum")
-
-DumpCMemory({ (pointer: UnsafeRawPointer?, knownSize: Int, maxDepth: Int, name: UnsafePointer<Int8>?) in
-    dumpAndOpenGraph(dumping: pointer!, knownSize: UInt(knownSize), maxDepth: maxDepth, filename: String(cString: name!))
-})
+//struct StructWithPadding {
+//    var a: UInt8 = 1
+//    var b: UInt8 = 2
+//    var c: UInt8 = 3
+//    var d: UInt16 = 4
+//    var e: UInt8 = 5
+//    var f: UInt32 = 6
+//    var g: UInt8 = 7
+//    var h: UInt64 = 8
+//}
+//dumpAndOpenGraph(dumping: StructWithPadding(), maxDepth: 60, filename: "StructWithPadding")
+//
+//
+//class ClassWithPadding: NSObject {
+//    var a: UInt8 = 1
+//    var b: UInt8 = 2
+//    var c: UInt8 = 3
+//    var d: UInt16 = 4
+//    var e: UInt8 = 5
+//    var f: UInt32 = 6
+//    var g: UInt8 = 7
+//    var h: UInt64 = 8
+//}
+//dumpAndOpenGraph(dumping: ClassWithPadding(), maxDepth: 60, filename: "ClassWithPadding")
+//
+//class DeepClassSuper1: NSObject {
+//    var a = 1
+//}
+//class DeepClassSuper2: DeepClassSuper1 {
+//    var b = 2
+//}
+//class DeepClassSuper3: DeepClassSuper2 {
+//    var c = 3
+//}
+//class DeepClass: DeepClassSuper3 {
+//    var d = 4
+//}
+//dumpAndOpenGraph(dumping: DeepClass(), maxDepth: 60, filename: "DeepClass")
+//
+//dumpAndOpenGraph(dumping: [1, 2, 3, 4, 5], maxDepth: 4, filename: "IntegerArray")
+//
+//struct StructSmallP: P {
+//    func f() {}
+//    func g() {}
+//    func h() {}
+//    var a = 0x6c6c616d73
+//}
+//struct StructBigP: P {
+//    func f() {}
+//    func g() {}
+//    func h() {}
+//    var a = 0x656772616c
+//    var b = 0x1010101010101010
+//    var c = 0x2020202020202020
+//    var d = 0x3030303030303030
+//}
+//struct ClassP: P {
+//    func f() {}
+//    func g() {}
+//    func h() {}
+//    var a = 0x7373616c63
+//    var b = 0x4040404040404040
+//    var c = 0x5050505050505050
+//    var d = 0x6060606060606060
+//}
+//struct ProtocolHolder {
+//    var a: P
+//    var b: P
+//    var c: P
+//}
+//let holder = ProtocolHolder(a: StructSmallP(), b: StructBigP(), c: ClassP())
+//dumpAndOpenGraph(dumping: holder, maxDepth: 4, filename: "ProtocolTypes")
+//
+//enum SimpleEnum {
+//    case A, B, C, D, E
+//}
+//struct SimpleEnumHolder {
+//    var a: SimpleEnum
+//    var b: SimpleEnum
+//    var c: SimpleEnum
+//    var d: SimpleEnum
+//    var e: SimpleEnum
+//}
+//dumpAndOpenGraph(dumping: SimpleEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "SimpleEnum")
+//
+//enum IntRawValueEnum: Int {
+//    case A = 1, B, C, D, E
+//}
+//struct IntRawValueEnumHolder {
+//    var a: IntRawValueEnum
+//    var b: IntRawValueEnum
+//    var c: IntRawValueEnum
+//    var d: IntRawValueEnum
+//    var e: IntRawValueEnum
+//}
+//dumpAndOpenGraph(dumping: IntRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "IntRawValueEnum")
+//
+//enum StringRawValueEnum: String {
+//    case A = "whatever", B, C, D, E
+//}
+//struct StringRawValueEnumHolder {
+//    var a: StringRawValueEnum
+//    var b: StringRawValueEnum
+//    var c: StringRawValueEnum
+//    var d: StringRawValueEnum
+//    var e: StringRawValueEnum
+//}
+//dumpAndOpenGraph(dumping: StringRawValueEnumHolder(a: .A, b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "StringRawValueEnum")
+//
+//enum OneAssociatedObjectEnum {
+//    case A(AnyObject)
+//    case B, C, D, E
+//}
+//struct OneAssociatedObjectEnumHolder {
+//    var a: OneAssociatedObjectEnum
+//    var b: OneAssociatedObjectEnum
+//    var c: OneAssociatedObjectEnum
+//    var d: OneAssociatedObjectEnum
+//    var e: OneAssociatedObjectEnum
+//}
+//dumpAndOpenGraph(dumping: OneAssociatedObjectEnumHolder(a: .A(NSObject()), b: .B, c: .C, d: .D, e: .E), maxDepth: 5, filename: "OneSssociatedObjectEnum")
+//
+//enum ManyAssociatedObjectsEnum {
+//    case A(AnyObject)
+//    case B(AnyObject)
+//    case C(AnyObject)
+//    case D(AnyObject)
+//    case E(AnyObject)
+//}
+//struct ManyAssociatedObjectsEnumHolder {
+//    var a: ManyAssociatedObjectsEnum
+//    var b: ManyAssociatedObjectsEnum
+//    var c: ManyAssociatedObjectsEnum
+//    var d: ManyAssociatedObjectsEnum
+//    var e: ManyAssociatedObjectsEnum
+//}
+//dumpAndOpenGraph(dumping: ManyAssociatedObjectsEnumHolder(a: .A(NSObject()), b: .B(NSObject()), c: .C(NSObject()), d: .D(NSObject()), e: .E(NSObject())), maxDepth: 5, filename: "ManySssociatedObjectsEnum")
+//
+//DumpCMemory({ (pointer: UnsafeRawPointer?, knownSize: Int, maxDepth: Int, name: UnsafePointer<Int8>?) in
+//    dumpAndOpenGraph(dumping: pointer!, knownSize: UInt(knownSize), maxDepth: maxDepth, filename: String(cString: name!))
+//})
