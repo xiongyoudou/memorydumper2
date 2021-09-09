@@ -14,6 +14,7 @@ void DumpCMemory(void (^dump)(const void *ptr, size_t knownSize, long maxDepth, 
     S s = { 1, 2, 3 };
     dump(&s, sizeof(s), 10, "Simple C struct");
     
+    
     struct WithPadding {
         char a;
         char b;
