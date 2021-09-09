@@ -28,6 +28,7 @@ void DumpCMemory(void (^dump)(const void *ptr, size_t knownSize, long maxDepth, 
     WithPadding withPadding = { 1, 2, 3, 4, 5, 6, 7, 8 };
     dump(&withPadding, sizeof(withPadding), 10, "C struct with padding");
     
+    
     struct MallocLeaf {
         char text[16];
     };
