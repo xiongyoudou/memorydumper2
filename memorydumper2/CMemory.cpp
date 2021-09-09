@@ -44,6 +44,7 @@ void DumpCMemory(void (^dump)(const void *ptr, size_t knownSize, long maxDepth, 
         MallocTreeNode2 *child2;
     };
     
+    
     MallocLeaf *leaf1 = (MallocLeaf *)malloc(sizeof(MallocLeaf));
     MallocLeaf *leaf2 = (MallocLeaf *)malloc(sizeof(MallocLeaf));
     MallocTreeNode1 *node1 = (MallocTreeNode1 *)malloc(sizeof(MallocTreeNode1));
